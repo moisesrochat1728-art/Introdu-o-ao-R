@@ -1,0 +1,175 @@
+---
+title: "Fortaleza vs Total — Relação por CNAE"
+author: "Moisés Rocha"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+use_pkg <- function(pkgs){
+  miss <- pkgs[!pkgs %in% rownames(installed.packages())]
+  if(length(miss)) install.packages(miss, dependencies = TRUE)
+  invisible(lapply(pkgs, library, character.only = TRUE))
+}
+
+use_pkg(c("readr","dplyr","stringr","stringi","ggplot2","scales","tidyr","purrr"))
+path_f1 <- "relatorio_mei (3) (2).csv"   # suposto: Fortaleza por CNAE
+path_f2 <- "relatorio_mei (1) (1).csv"   # suposto: Total ou outra base agregada
+
+stopifnot(file.exists(path_f1), file.exists(path_f2))
+
+df1 <- readr::read_csv(path_f1, show_col_types = FALSE)
+df2 <- readr::read_csv(path_f2, show_col_types = FALSE)
+
+glimpse(df1)
+glimpse(df2)
+norm_names <- function(x){
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    stringr::str_to_lower() %>%
+    stringr::str_squish()
+}
+
+# Função para renomear colunas essenciais
+prep <- function(df){
+  nm <- names(df)
+  nm_norm <- norm_names(nm)
+  # mapear CNAE
+  has_cnae <- which(nm_norm %in% c("cnae","cnae_cod","cod_cnae","codigo cnae","codigo_cnae"))
+  if(length(has_cnae)==0 && "cnae" %in% nm) has_cnae <- which(nm=="cnae")
+  if(length(has_cnae)) names(df)[has_cnae[1]] <- "CNAE"
+
+  # mapear TOTAL
+  has_total <- which(nm_norm %in% c("total","qtde","quantidade","n","freq","valor"))
+  if(length(has_total)==0 && "TOTAL" %in% nm) has_total <- which(nm=="TOTAL")
+  if(length(has_total)) names(df)[has_total[1]] <- "TOTAL"
+
+  # mapear MUNICIPIO
+  has_mun <- which(nm_norm %in% c("municipio","município","cidade","localidade"))
+  if(length(has_mun)) names(df)[has_mun[1]] <- "MUNICIPIO"
+
+  df
+}
+
+d1 <- prep(df1)
+d2 <- prep(df2)
+
+# Identificar papel via MUNICIPIO
+is_fort_1 <- "MUNICIPIO" %in% names(d1) && any(norm_names(d1$MUNICIPIO)=="fortaleza", na.rm = TRUE)
+is_fort_2 <- "MUNICIPIO" %in% names(d2) && any(norm_names(d2$MUNICIPIO)=="fortaleza", na.rm = TRUE)
+
+if(is_fort_1 && !is_fort_2){
+  fort <- d1
+  tot  <- d2
+} else if(is_fort_2 && !is_fort_1){
+  fort <- d2
+  tot  <- d1
+} else {
+  # fallback por cardinalidade: menor = Fortaleza (recorte)
+  if(nrow(d1) <= nrow(d2)){
+    fort <- d1
+    tot  <- d2
+  } else {
+    fort <- d2
+    tot  <- d1
+  }
+}
+
+# Manter apenas colunas essenciais
+fort <- fort %>% select(any_of(c("CNAE","TOTAL","MUNICIPIO")))
+tot  <- tot  %>% select(any_of(c("CNAE","TOTAL","MUNICIPIO")))
+
+# Garantir tipos
+fort <- fort %>% mutate(TOTAL = suppressWarnings(as.numeric(TOTAL)))
+tot  <- tot  %>% mutate(TOTAL  = suppressWarnings(as.numeric(TOTAL)))
+
+# Se fort tiver MUNICIPIO, filtrar Fortaleza
+if("MUNICIPIO" %in% names(fort)){
+  fort <- fort %>% filter(norm_names(MUNICIPIO)=="fortaleza") %>% select(-MUNICIPIO)
+}
+
+# Se tot tiver MUNICIPIO (raro), agregamos para total geral por CNAE
+if("MUNICIPIO" %in% names(tot)){
+  tot <- tot %>% group_by(CNAE) %>% summarise(TOTAL = sum(TOTAL, na.rm = TRUE), .groups="drop")
+}
+
+# Remover NAs de CNAE/TOTAL
+fort <- fort %>% filter(!is.na(CNAE), !is.na(TOTAL))
+tot  <- tot  %>% filter(!is.na(CNAE), !is.na(TOTAL))
+
+cat("Dimensões após padronização:\n")
+print(dim(fort)); print(dim(tot))
+base <- full_join(
+  fort %>% rename(TOTAL_FORT = TOTAL),
+  tot  %>% rename(TOTAL_GERAL = TOTAL),
+  by = "CNAE"
+) %>%
+  mutate(
+    TOTAL_FORT  = coalesce(TOTAL_FORT, 0),
+    TOTAL_GERAL = coalesce(TOTAL_GERAL, 0),
+    share_fortaleza_no_total = ifelse(TOTAL_GERAL>0, TOTAL_FORT/TOTAL_GERAL, NA_real_)
+  )
+
+soma_fort <- sum(base$TOTAL_FORT, na.rm = TRUE)
+soma_tot  <- sum(base$TOTAL_GERAL, na.rm = TRUE)
+
+base <- base %>%
+  mutate(
+    peso_no_fortaleza = ifelse(soma_fort>0, TOTAL_FORT/soma_fort, NA_real_),
+    peso_no_total     = ifelse(soma_tot>0,  TOTAL_GERAL/soma_tot, NA_real_)
+  )
+
+# Ordenações úteis
+base_top_share <- base %>%
+  filter(!is.na(share_fortaleza_no_total), TOTAL_GERAL>0) %>%
+  arrange(desc(share_fortaleza_no_total))
+
+base_top_fort  <- base %>% arrange(desc(TOTAL_FORT))
+base_top_total <- base %>% arrange(desc(TOTAL_GERAL))
+
+head(base_top_share, 10)
+plot_df <- base_top_share %>%
+  slice_head(n = 20) %>%
+  mutate(CNAE = as.factor(CNAE))
+
+ggplot(plot_df, aes(x = reorder(CNAE, share_fortaleza_no_total),
+                    y = share_fortaleza_no_total)) +
+  geom_col(fill = "#2C7FB8") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Top 20 — Participação de Fortaleza no Total por CNAE",
+       x = "CNAE", y = "Participação (%)") +
+  theme_minimal()
+heat <- base %>%
+  mutate(has_fort = TOTAL_FORT>0,
+         has_tot  = TOTAL_GERAL>0,
+         intensidade = ifelse(TOTAL_GERAL>0, TOTAL_FORT/TOTAL_GERAL, NA_real_)) %>%
+  filter(!is.na(intensidade))
+
+# Selecionar 30 CNAEs mais intensos
+heat30 <- heat %>%
+  arrange(desc(intensidade)) %>%
+  slice_head(n = 30)
+
+ggplot(heat30, aes(x = "Fortaleza/Total", y = as.factor(CNAE), fill = intensidade)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0.1, limits = c(0,1), oob = scales::squish,
+                       name = "Share FORT/Total") +
+  labs(title = "Heatmap — Intensidade (Fortaleza/Total) por CNAE",
+       x = "", y = "CNAE") +
+  theme_minimal()
+resultado <- base %>%
+  arrange(desc(share_fortaleza_no_total)) %>%
+  mutate(across(c(share_fortaleza_no_total, peso_no_fortaleza, peso_no_total), ~round(.x, 6)))
+
+readr::write_csv(resultado, "fortaleza_vs_total_cnae_resultado.csv")
+
+# Mostrar primeiras linhas
+head(resultado, 20)
