@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Fortaleza x Total — Relação por CNAE</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<style>
+  :root {
+    --bg: #0b0f14; --card:#121821; --muted:#9fb3c8; --text:#e8f0f7; --accent:#35b0ff;
+    --ok:#1B9E77; --warn:#D95F02; --line:#243241;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+         background: linear-gradient(180deg, #0b0f14 0%, #0d1320 100%); color: var(--text); }
+  header { padding: 24px 20px 8px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 700;}
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 20px 40px; }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  @media (min-width: 980px){ .grid { grid-template-columns: 1fr 1fr; } }
+  .card { background: linear-gradient(180deg, #121821 0%, #0f1621 100%); border: 1px solid #1e2a3a;
+          border-radius: 16px; padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+  .card h2 { font-size: 16px; margin: 0 0 12px; color: #d7e7f7; }
+  .controls { display: grid; gap: 12px; grid-template-columns: 1fr; }
+  @media (min-width: 680px){ .controls { grid-template-columns: 1fr 1fr; } }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input[type="file"] { width: 100%; background: #0f1520; color: var(--text); border: 1px solid #203045;
+    padding: 10px 12px; border-radius: 12px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .btn { background: #0f5da5; color: #fff; border: none; padding: 10px 14px; border-radius: 12px;
+         cursor: pointer; font-weight: 600; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .pill { display: inline-block; padding: 6px 10px; border: 1px solid #22405c; border-radius: 999px;
+          color: var(--muted); font-size: 12px; }
+  canvas { width: 100% !important; height: 420px !important; background: #0c121b; border-radius: 12px; }
+  .notice { font-size: 13px; color: var(--muted); }
+  footer { text-align:center; color:#7089a4; padding: 16px 0 40px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <h1>Fortaleza x Total — Relação por CNAE</h1>
+  <div class="notice">Carregue <b>Fortaleza por CNAE</b> (CNAE,TOTAL) e opcionalmente <b>Total por CNAE</b> (CNAE,TOTAL).
+    O app calcula participações, Pareto, dispersões e permite baixar o CSV com métricas.</div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="controls">
+      <div>
+        <label>Arquivo 1 — Fortaleza por CNAE (CNAE,TOTAL)</label>
+        <input id="fileFort" type="file" accept=".csv" />
+      </div>
+      <div>
+        <label>Arquivo 2 — Total por CNAE (CNAE,TOTAL) <span class="pill">opcional</span></label>
+        <input id="fileTot" type="file" accept=".csv" />
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnProcess" class="btn" disabled>Processar</button>
+      <button id="btnDownload" class="btn" disabled>Baixar CSV com métricas</button>
+      <span id="status" class="notice"></span>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top:16px">
+    <div class="card"><h2>Top 20 CNAEs por participação Fortaleza/Total</h2><canvas id="chartShare"></canvas>
+      <div class="notice">Requer “Total por CNAE”.</div></div>
+    <div class="card"><h2>Top 20 CNAEs por total absoluto (Fortaleza)</h2><canvas id="chartTopFort"></canvas></div>
+    <div class="card"><h2>Pareto dos CNAEs (Fortaleza)</h2><canvas id="chartPareto"></canvas></div>
+    <div class="card"><h2>Pesos internos — Fortaleza vs Total (Top 20 Fortaleza)</h2><canvas id="chartPesos"></canvas>
+      <div class="notice">Requer “Total por CNAE”.</div></div>
+    <div class="card"><h2>Dispersão (log-log): Total vs Fortaleza por CNAE</h2><canvas id="chartScatter"></canvas>
+      <div class="notice">Requer “Total por CNAE”.</div></div>
+  </div>
+</div>
+
+<footer>Feito com Chart.js + PapaParse. Tudo roda localmente no navegador.</footer>
+
+<!-- libs -->
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+let dataFort = null, dataTot = null, metrics = null;
+let chShare, chTopFort, chPareto, chPesos, chScatter;
+
+const fmtPct = (x) => (x!=null && isFinite(x)) ? (x*100).toFixed(1)+'%' : '—';
+const toNum = (v) => {
+  if (v===null || v===undefined) return null;
+  const n = Number(String(v).replace(/\./g,'').replace(',', '.'));
+  return isFinite(n) ? n : null;
+};
+
+function parseCSV(file){
+  return new Promise((resolve,reject)=>{
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res)=> resolve(res.data),
+      error: (err)=> reject(err)
+    });
+  });
+}
+
+function normalizeFort(rows){
+  // Espera CNAE,TOTAL
+  return rows
+    .map(r => ({ CNAE: String(r.CNAE ?? r.cnae ?? '').trim(),
+                 TOTAL: toNum(r.TOTAL ?? r.total) }))
+    .filter(r => r.CNAE && r.TOTAL!=null);
+}
+
+function normalizeTot(rows){
+  // Espera CNAE,TOTAL
+  const hasCNAE = rows.some(r => r.CNAE || r.cnae);
+  if(!hasCNAE){
+    // Usuário pode ter carregado MUNICIPIO,TOTAL por engano
+    return [];
+  }
+  return rows
+    .map(r => ({ CNAE: String(r.CNAE ?? r.cnae ?? '').trim(),
+                 TOTAL: toNum(r.TOTAL ?? r.total) }))
+    .filter(r => r.CNAE && r.TOTAL!=null);
+}
+
+function buildMetrics(fort, tot){
+  // Índices por CNAE
+  const idxFort = new Map(fort.map(r => [r.CNAE, r.TOTAL]));
+  const idxTot  = new Map((tot||[]).map(r => [r.CNAE, r.TOTAL]));
+  const setAll = new Set([...idxFort.keys(), ...idxTot.keys()]);
+  const somaFort = Array.from(idxFort.values()).reduce((a,b)=>a+(b||0), 0);
+  const somaTot  = Array.from(idxTot.values()).reduce((a,b)=>a+(b||0), 0);
+
+  const rows = Array.from(setAll).map(k => {
+    const f = idxFort.get(k) || 0;
+    const t = idxTot.has(k) ? (idxTot.get(k)||0) : null; // null se total não fornecido
+    const shareFortTotal = (t && t>0) ? (f/t) : null;
+    const pesoFort = somaFort>0 ? f/somaFort : null;
+    const pesoTot  = (somaTot>0 && t!=null) ? t/somaTot : null;
+    return { CNAE: k, TOTAL_FORT: f, TOTAL_GERAL: t, share_fort_total: shareFortTotal,
+             peso_no_fortaleza: pesoFort, peso_no_total: pesoTot };
+  });
+
+  // Ordenações úteis
+  const byShare = rows.filter(r=>r.share_fort_total!=null).sort((a,b)=> (b.share_fort_total - a.share_fort_total));
+  const byFort  = rows.slice().sort((a,b)=> (b.TOTAL_FORT - a.TOTAL_FORT));
+  return { rows, byShare, byFort, somaFort, somaTot };
+}
+
+function destroyChart(ch){ if(ch){ ch.destroy(); } }
+
+function drawShareTop(ctx, metrics){
+  if(!metrics.somaTot || !metrics.byShare.length){ return; }
+  const top = metrics.byShare.slice(0,20);
+  destroyChart(chShare);
+  chShare = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top.map(d=>d.CNAE),
+      datasets: [{
+        label: 'Share Fortaleza/Total (%)',
+        data: top.map(d=> d.share_fort_total*100),
+      }]
+    },
+    options: {
+      scales: { x: { ticks:{ color:'#cfe0f1' } },
+                y: { ticks:{ color:'#cfe0f1' } } },
+      plugins: { legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=> ctx.raw.toFixed(2)+'%' } } }
+    }
+  });
+}
+
+function drawTopFort(ctx, metrics){
+  const top = metrics.byFort.slice(0,20).sort((a,b)=>a.TOTAL_FORT - b.TOTAL_FORT);
+  destroyChart(chTopFort);
+  chTopFort = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: top.map(d=>d.CNAE),
+      datasets: [{ label:'Total MEIs (Fortaleza)', data: top.map(d=>d.TOTAL_FORT) }] },
+    options: { indexAxis:'y', plugins:{ legend:{display:false} },
+      scales:{ x:{ ticks:{ color:'#cfe0f1' } }, y:{ ticks:{ color:'#cfe0f1' } } } }
+  });
+}
+
+function drawPareto(ctx, metrics){
+  const ord = metrics.byFort.slice();
+  const total = metrics.somaFort || 1;
+  let acc = 0;
+  const bars = ord.map(r => (r.TOTAL_FORT/total));
+  const acum = ord.map(r => (acc += r.TOTAL_FORT/total));
+
+  destroyChart(chPareto);
+  chPareto = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: ord.map((_,i)=> i+1), datasets: [
+      { type:'bar', label:'% por CNAE', data: bars, yAxisID:'y' },
+      { type:'line', label:'Acumulado', data: acum, borderWidth:2, tension:.2, yAxisID:'y1' }
+    ]},
+    options: {
+      scales: {
+        y:  { beginAtZero:true, ticks:{ callback:(v)=> (v*100).toFixed(0)+'%', color:'#cfe0f1' } },
+        y1: { position:'right', beginAtZero:true, min:0, max:1,
+              ticks:{ callback:(v)=> (v*100).toFixed(0)+'%', color:'#cfe0f1' } },
+        x:  { ticks:{ color:'#cfe0f1' } }
+      },
+      plugins:{ legend:{ labels:{ color:'#cfe0f1' } } }
+    }
+  });
+}
+
+function drawPesos(ctx, metrics){
+  if(!metrics.somaTot){ return; }
+  const top = metrics.byFort.slice(0,20);
+  destroyChart(chPesos);
+  chPesos = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top.map(d=>d.CNAE),
+      datasets: [
+        { label:'Peso dentro de Fortaleza (%)', data: top.map(d=> (d.peso_no_fortaleza||0)*100) },
+        { label:'Peso dentro do Total (%)', data: top.map(d=> (d.peso_no_total!=null? d.peso_no_total:0)*100) }
+      ]
+    },
+    options: { responsive:true, scales:{
+        x:{ stacked:false, ticks:{ color:'#cfe0f1' } },
+        y:{ stacked:false, ticks:{ color:'#cfe0f1' } }
+      },
+      plugins:{ legend:{ labels:{ color:'#cfe0f1' } } }
+    }
+  });
+}
+
+function drawScatter(ctx, metrics){
+  if(!metrics.somaTot){ return; }
+  const pts = metrics.rows.filter(r=> r.TOTAL_FORT>0 && r.TOTAL_GERAL>0);
+  destroyChart(chScatter);
+  chScatter = new Chart(ctx, {
+    type: 'scatter',
+    data: { datasets:[{
+      label:'CNAEs', data: pts.map(p=> ({x: p.TOTAL_GERAL, y: p.TOTAL_FORT})),
+      pointRadius: 3
+    }]},
+    options: { scales:{
+        x:{ type:'logarithmic', ticks:{ color:'#cfe0f1' }, title:{ display:true, text:'Total por CNAE (Geral)' }},
+        y:{ type:'logarithmic', ticks:{ color:'#cfe0f1' }, title:{ display:true, text:'Total por CNAE (Fortaleza)' }}
+      },
+      plugins:{ legend:{ labels:{ color:'#cfe0f1' } },
+        tooltip:{ callbacks:{ label:(ctx)=> `Total: ${ctx.raw.x} | Fort: ${ctx.raw.y}` } } }
+    }
+  });
+}
+
+function toCSV(rows){
+  const cols = ["CNAE","TOTAL_FORT","TOTAL_GERAL","share_fort_total","peso_no_fortaleza","peso_no_total"];
+  const head = cols.join(",");
+  const body = rows.map(r => cols.map(k => r[k] ?? "").join(",")).join("\n");
+  return head + "\n" + body;
+}
+
+$('#fileFort').addEventListener('change', ()=> {
+  $('#status').textContent = '';
+  $('#btnProcess').disabled = !$('#fileFort').files.length;
+});
+$('#fileTot').addEventListener('change', ()=> {
+  $('#status').textContent = '';
+});
+
+$('#btnProcess').addEventListener('click', async ()=>{
+  try{
+    $('#status').textContent = 'Lendo arquivos...';
+    // Fortaleza
+    const f1 = $('#fileFort').files[0];
+    const rowsF = await parseCSV(f1);
+    dataFort = normalizeFort(rowsF);
+
+    // Total (opcional)
+    if($('#fileTot').files.length){
+      const f2 = $('#fileTot').files[0];
+      const rowsT = await parseCSV(f2);
+      dataTot = normalizeTot(rowsT);
+    } else {
+      dataTot = null;
+    }
+
+    metrics = buildMetrics(dataFort, dataTot);
+    $('#status').textContent = `OK — Fortaleza: ${dataFort.length} CNAEs` + (dataTot ? ` | Total: ${dataTot.length} CNAEs` : ' | Total: não fornecido');
+
+    drawShareTop($('#chartShare'), metrics);
+    drawTopFort($('#chartTopFort'), metrics);
+    drawPareto($('#chartPareto'), metrics);
+    drawPesos($('#chartPesos'), metrics);
+    drawScatter($('#chartScatter'), metrics);
+
+    $('#btnDownload').disabled = false;
+  }catch(err){
+    console.error(err);
+    $('#status').textContent = 'Erro ao processar. Verifique o formato dos CSVs.';
+  }
+});
+
+$('#btnDownload').addEventListener('click', ()=>{
+  if(!metrics) return;
+  const csv = toCSV(metrics.rows);
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'fortaleza_vs_total_cnae.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
